@@ -26,9 +26,12 @@ Após o carregamento, o sistema identificará automaticamente os leads que reque
 # 2) Carregamento da chave e inicialização do cliente
 api_key = None
 try:
-    api_key = st.secrets["OPENAI_API_KEY"]
+    api_key = st.secrets["openai"]["api_key"]
     st.sidebar.success("Chave da API carregada de secrets.toml.")
+    st.write(f"Chave encontrada: {api_key[:5]}...")  # Mostra os primeiros 5 caracteres
 except KeyError:
+    # ... (resto do código)
+
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
         st.sidebar.success("Chave da API carregada de variável de ambiente.")
