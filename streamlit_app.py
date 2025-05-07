@@ -1,151 +1,213 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import requests
+import io
+import openai
+import os
+from pandas.tseries.offsets import BusinessDay  # Para calcular dias úteis
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(page_title="Agente de Leads Prioritários", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# 1) Cabeçalho e instruções
+st.title("Análise de Leads Prioritários")
+st.markdown("""
+Este aplicativo permite carregar uma base de dados de atendimentos em formato Excel (.xlsx).  
+Você pode fazer upload do arquivo ou inserir uma URL direta.  
+Após o carregamento, o sistema identificará automaticamente os leads que requerem atenção urgente e gerará um relatório detalhado usando um agente inteligente.
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+**Critérios de Prioridade:**  
+- Leads com sinais de interesse/objeção no registro  
+- Leads sem contato nos últimos 2 dias úteis  
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+**Certifique-se de ter configurado sua chave da API do OpenAI em**  
+`.streamlit/secrets.toml` **ou como variável de ambiente** `OPENAI_API_KEY`.
+""")
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+# 2) Carregamento da chave e inicialização do cliente
+api_key = None
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+    st.sidebar.success("Chave da API carregada de secrets.toml.")
+except KeyError:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        st.sidebar.success("Chave da API carregada de variável de ambiente.")
+    else:
+        st.sidebar.error(
+            "Chave da API do OpenAI não encontrada. "
+            "Crie `.streamlit/secrets.toml` ou defina `OPENAI_API_KEY`."
         )
+        st.stop()
+
+try:
+    client = openai.OpenAI(api_key=api_key)
+except Exception as e:
+    st.sidebar.error(f"Erro ao inicializar cliente OpenAI: {e}")
+    st.stop()
+
+# 3) Upload ou URL do Excel
+st.header("1. Carregar Base de Conhecimento (.xlsx)")
+source = st.radio("Selecione a origem do arquivo:", ("Upload", "URL"))
+
+excel_bytes = None
+if source == "Upload":
+    uploaded_file = st.file_uploader("Selecione o arquivo .xlsx", type=["xlsx"])
+    if uploaded_file:
+        excel_bytes = uploaded_file.read()
+else:
+    url = st.text_input("Insira a URL do arquivo .xlsx")
+    if url:
+        try:
+            resp = requests.get(url)
+            resp.raise_for_status()
+            excel_bytes = resp.content
+        except Exception as e:
+            st.error(f"Erro ao baixar o arquivo: {e}")
+
+if excel_bytes is None:
+    st.info("Por favor, faça o upload do arquivo ou insira a URL para continuar.")
+    st.stop()
+
+# 4) Leitura e tratamento básico
+try:
+    df = pd.read_excel(io.BytesIO(excel_bytes), engine="openpyxl")
+    df['Data do Atendimento'] = pd.to_datetime(df['Data do Atendimento'], errors='coerce')
+    df.dropna(subset=['Data do Atendimento'], inplace=True)
+    df["Registro"] = df["Registro"].astype(str).fillna("")
+    df["Atendente"] = df["Atendente"].astype(str).fillna("Não Informado")
+except Exception as e:
+    st.error(f"Falha ao ler/processar o Excel: {e}")
+    st.stop()
+
+required_cols = ["Data do Atendimento", "Nome do Atendido", "Atendente", "Registro"]
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    st.error(f"Colunas faltantes no arquivo: {missing}")
+    st.stop()
+
+# 5) Filtragem de leads prioritários
+keywords = r"repique|novo repique|objeção|objeções|urgente|fechar|matricula|interessado|proposta"
+mask_kw = df["Registro"].str.contains(keywords, case=False, na=False)
+two_bd_ago = pd.Timestamp.now() - BusinessDay(2)
+mask_date = df['Data do Atendimento'] <= two_bd_ago
+df_priority = df[mask_kw | mask_date].reset_index(drop=True)
+
+st.header("2. Leads Prioritários Identificados (Critérios Atualizados)")
+if df_priority.empty:
+    st.warning("Nenhum lead prioritário encontrado com os critérios atuais.")
+else:
+    st.dataframe(df_priority)
+
+# 6) Prompt do agente - Adaptado para processar UM lead por vez
+agent_prompt = """
+<agente>[Role]
+Você é um agente especialista em análise de dados de leads, focado em identificar leads que requerem atenção imediata e fornecer sugestões de abordagem via WhatsApp. Você é um consultor de vendas experiente.
+
+[Objetivo]
+Seu objetivo é analisar os dados de **UM ÚNICO LEAD** fornecido e gerar APENAS a seção do relatório correspondente a este lead, incluindo uma sugestão de mensagem para WhatsApp.
+
+[Cenário]
+Você receberá os dados de um lead prioritário por vez. Sua tarefa é gerar a saída formatada para este lead específico.
+
+[Solução Esperada]
+Gere a seção do relatório para o lead fornecido, formatada em **Markdown**, seguindo este modelo EXATO:
+
+---
+**Lead Prioritário:**
+Nome: [Nome completo do Atendido]
+Atendente: [Primeiro nome do Atendente]
+Data: [Data do Atendimento]
+Motivo da Prioridade: [Breve descrição do motivo, baseada no 'Registro' ou na falta de contato recente. Exemplos: "Objeção de Preço", "Interesse em Fechar Matrícula", "Sem Contato há mais de 2 dias úteis", "Repique Pendente"].
+Sugestão de Abordagem (WhatsApp): [Mensagem objetiva, jovial, com uso moderado de emojis, pronta para envio. Personalize com base no 'Registro' ou falta de contato. Inclua placeholders como "[Nome do Lead]", "[Seu Nome]".]
+---
+
+-   Use **negrito** para os títulos de seção conforme o modelo.
+-   Inclua a linha horizontal (`---`) **apenas no início e no fim** da seção deste lead.
+-   Se o 'Registro' mencionar "Repique" ou "novo repique", adicione uma linha extra APÓS a Sugestão de Abordagem, formatada como: **Alerta Especial: Repique/Novo Repique para [Nome Completo do Lead]**.
+-   Seja conciso e direto.
+
+[Exemplo de Entrada (você receberá os dados neste formato)]
+Dados do Lead Prioritário:
+- Nome Lead: Josiele Pereira
+  Atendente: Mariana
+  Data: 2025-01-04
+  Registro Completo: O lead mencionou que achou o preço alto, mas ficou de pensar. Possível objeção de preço.
+
+[Exemplo de Saída Esperada (em Markdown)]
+---
+**Lead Prioritário:**
+Nome: Josiele Pereira
+Atendente: Mariana
+Data: 2025-01-04
+Motivo da Prioridade: Objeção de Preço
+Sugestão de Abordagem (WhatsApp):
+Olá, Josiele! 👋 Tudo bem por aí?
+
+Vi aqui que você mencionou sua dúvida sobre valores. Queria ver se consigo te ajudar rapidinho com isso! Que tal a gente conversar 5 minutinhos? ✨
+
+Me diz o melhor horário pra você! 😊
+---
+""".strip()
+
+
+def gerar_relatorio(client: openai.OpenAI, df_leads: pd.DataFrame) -> str:
+    relatorio_completo = []
+    total_leads = len(df_leads)
+    
+    # Itera sobre cada lead no DataFrame de prioritários
+    for index, row in df_leads.iterrows():
+        st.info(f"Processando lead {index + 1} de {total_leads}...") # Feedback de progresso
+        
+        atendente = str(row["Atendente"]).split()[0] if pd.notna(row["Atendente"]) else "N/A"
+        registro_str = str(row["Registro"]) if pd.notna(row["Registro"]) else ""
+
+        # Prepara o conteúdo para este lead específico
+        user_content = (
+            "Dados do Lead Prioritário:\n"
+            f"- Nome Lead: {row['Nome do Atendido']}\n"
+            f"  Atendente: {atendente}\n"
+            f"  Data: {row['Data do Atendimento'].strftime('%Y-%m-%d') if pd.notna(row['Data do Atendimento']) else 'N/A'}\n"
+            f"  Registro Completo: {registro_str}"
+        )
+
+        try:
+            # Chama a API para este lead individual
+            resp = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": agent_prompt},
+                    {"role": "user",   "content": user_content}
+                ],
+                max_tokens=500, # Reduzido, pois agora processa apenas um lead por vez
+                temperature=0.7
+            )
+            # Adiciona a resposta do agente (seção do relatório) à lista
+            relatorio_completo.append(resp.choices[0].message.content)
+            
+        except Exception as e:
+            # Adiciona uma mensagem de erro para este lead específico se a API falhar
+            relatorio_completo.append(
+                f"---"
+                f"\n**Lead Prioritário:**\nNome: {row['Nome do Atendido']}\n"
+                f"Atendente: {atendente}\nData: {row['Data do Atendimento'].strftime('%Y-%m-%d') if pd.notna(row['Data do Atendimento']) else 'N/A'}\n"
+                f"Motivo da Prioridade: Erro ao processar\n"
+                f"Sugestão de Abordagem (WhatsApp): Erro na geração ({e})\n"
+                f"---"
+            )
+            st.error(f"Erro ao processar lead {row['Nome do Atendido']}: {e}")
+
+    # Junta todas as seções geradas pelo agente em um único relatório
+    # Note que o agente já inclui os "---" no início e fim de cada seção
+    return "".join(relatorio_completo)
+
+
+# 7) Botão e exibição em Markdown
+if not df_priority.empty:
+    if st.button("Gerar Relatório de Leads Prioritários"):
+        with st.spinner("Processando e gerando relatório..."):
+            relatorio = gerar_relatorio(client, df_priority)
+            st.header("3. Relatório Gerado pelo Agente")
+            # Exibe o relatório completo. Como o agente já formata com Markdown e "---",
+            # st.markdown renderizará corretamente.
+            st.markdown(relatorio)
+
