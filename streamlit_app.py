@@ -11,42 +11,43 @@ st.set_page_config(page_title="Agente de Leads Prioritários", layout="wide")
 # 1) Cabeçalho e instruções
 st.title("Análise de Leads Prioritários")
 st.markdown("""
-Este aplicativo permite carregar uma base de dados de atendimentos em formato Excel (.xlsx).  
-Você pode fazer upload do arquivo ou inserir uma URL direta.  
+Este aplicativo permite carregar uma base de dados de atendimentos em formato Excel (.xlsx).
+Você pode fazer upload do arquivo ou inserir uma URL direta.
 Após o carregamento, o sistema identificará automaticamente os leads que requerem atenção urgente e gerará um relatório detalhado usando um agente inteligente.
 
-**Critérios de Prioridade:**  
-- Leads com sinais de interesse/objeção no registro  
-- Leads sem contato nos últimos 2 dias úteis  
+**Critérios de Prioridade:**
+- Leads com sinais de interesse/objeção no registro
+- Leads sem contato nos últimos 2 dias úteis
 
-**Certifique-se de ter configurado sua chave da API do OpenAI em**  
+**Certifique-se de ter configurado sua chave da API do OpenAI em**
 `.streamlit/secrets.toml` **ou como variável de ambiente** `OPENAI_API_KEY`.
 """)
 
 # 2) Carregamento da chave e inicialização do cliente
 api_key = None
 try:
+    # Tenta ler do st.secrets, que no Streamlit Cloud lê do Secrets
     api_key = st.secrets["openai"]["api_key"]
-    st.sidebar.success("Chave da API carregada de secrets.toml.")
-    st.write(f"Chave encontrada: {api_key[:5]}...")  # Mostra os primeiros 5 caracteres
+    st.sidebar.success("Chave da API carregada de secrets.")
+    st.write(f"Chave encontrada (secrets): {api_key[:5]}...") # Feedback visual
 except KeyError:
-    # ... (resto do código)
-
+    # Se não encontrar em secrets, tenta ler da variável de ambiente
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
         st.sidebar.success("Chave da API carregada de variável de ambiente.")
+        st.write(f"Chave encontrada (ambiente): {api_key[:5]}...") # Feedback visual
     else:
         st.sidebar.error(
             "Chave da API do OpenAI não encontrada. "
-            "Crie `.streamlit/secrets.toml` ou defina `OPENAI_API_KEY`."
+            "Configure-a nas 'Secrets' do Streamlit Cloud ou como variável de ambiente `OPENAI_API_KEY`."
         )
-        st.stop()
+        st.stop() # Para a execução do app se a chave não for encontrada
 
 try:
     client = openai.OpenAI(api_key=api_key)
 except Exception as e:
     st.sidebar.error(f"Erro ao inicializar cliente OpenAI: {e}")
-    st.stop()
+    st.stop() # Para a execução se o cliente não puder ser inicializado
 
 # 3) Upload ou URL do Excel
 st.header("1. Carregar Base de Conhecimento (.xlsx)")
@@ -69,7 +70,7 @@ else:
 
 if excel_bytes is None:
     st.info("Por favor, faça o upload do arquivo ou insira a URL para continuar.")
-    st.stop()
+    st.stop() # Para a execução se o arquivo não for carregado
 
 # 4) Leitura e tratamento básico
 try:
@@ -80,13 +81,13 @@ try:
     df["Atendente"] = df["Atendente"].astype(str).fillna("Não Informado")
 except Exception as e:
     st.error(f"Falha ao ler/processar o Excel: {e}")
-    st.stop()
+    st.stop() # Para a execução se houver erro no processamento do Excel
 
 required_cols = ["Data do Atendimento", "Nome do Atendido", "Atendente", "Registro"]
 missing = [c for c in required_cols if c not in df.columns]
 if missing:
     st.error(f"Colunas faltantes no arquivo: {missing}")
-    st.stop()
+    st.stop() # Para a execução se colunas essenciais estiverem faltando
 
 # 5) Filtragem de leads prioritários
 keywords = r"repique|novo repique|objeção|objeções|urgente|fechar|matricula|interessado|proposta"
@@ -98,6 +99,7 @@ df_priority = df[mask_kw | mask_date].reset_index(drop=True)
 st.header("2. Leads Prioritários Identificados (Critérios Atualizados)")
 if df_priority.empty:
     st.warning("Nenhum lead prioritário encontrado com os critérios atuais.")
+    st.stop() # Para a execução se não houver leads prioritários
 else:
     st.dataframe(df_priority)
 
@@ -156,11 +158,11 @@ Me diz o melhor horário pra você! 😊
 def gerar_relatorio(client: openai.OpenAI, df_leads: pd.DataFrame) -> str:
     relatorio_completo = []
     total_leads = len(df_leads)
-    
+
     # Itera sobre cada lead no DataFrame de prioritários
     for index, row in df_leads.iterrows():
         st.info(f"Processando lead {index + 1} de {total_leads}...") # Feedback de progresso
-        
+
         atendente = str(row["Atendente"]).split()[0] if pd.notna(row["Atendente"]) else "N/A"
         registro_str = str(row["Registro"]) if pd.notna(row["Registro"]) else ""
 
@@ -186,18 +188,20 @@ def gerar_relatorio(client: openai.OpenAI, df_leads: pd.DataFrame) -> str:
             )
             # Adiciona a resposta do agente (seção do relatório) à lista
             relatorio_completo.append(resp.choices[0].message.content)
-            
+
         except Exception as e:
             # Adiciona uma mensagem de erro para este lead específico se a API falhar
+            st.error(f"Erro na chamada da API para {row['Nome do Atendido']}: {e}")
+            st.write(e) # Mostra o erro detalhado da API
             relatorio_completo.append(
                 f"---"
                 f"\n**Lead Prioritário:**\nNome: {row['Nome do Atendido']}\n"
                 f"Atendente: {atendente}\nData: {row['Data do Atendimento'].strftime('%Y-%m-%d') if pd.notna(row['Data do Atendimento']) else 'N/A'}\n"
                 f"Motivo da Prioridade: Erro ao processar\n"
-                f"Sugestão de Abordagem (WhatsApp): Erro na geração ({e})\n"
+                f"Sugestão de Abordagem (WhatsApp): Erro na geração\n" # Mensagem genérica de erro na sugestão
                 f"---"
             )
-            st.error(f"Erro ao processar lead {row['Nome do Atendido']}: {e}")
+
 
     # Junta todas as seções geradas pelo agente em um único relatório
     # Note que o agente já inclui os "---" no início e fim de cada seção
@@ -205,12 +209,10 @@ def gerar_relatorio(client: openai.OpenAI, df_leads: pd.DataFrame) -> str:
 
 
 # 7) Botão e exibição em Markdown
-if not df_priority.empty:
-    if st.button("Gerar Relatório de Leads Prioritários"):
-        with st.spinner("Processando e gerando relatório..."):
-            relatorio = gerar_relatorio(client, df_priority)
-            st.header("3. Relatório Gerado pelo Agente")
-            # Exibe o relatório completo. Como o agente já formata com Markdown e "---",
-            # st.markdown renderizará corretamente.
-            st.markdown(relatorio)
-
+if st.button("Gerar Relatório de Leads Prioritários"):
+    with st.spinner("Processando e gerando relatório..."):
+        relatorio = gerar_relatorio(client, df_priority)
+        st.header("3. Relatório Gerado pelo Agente")
+        # Exibe o relatório completo. Como o agente já formata com Markdown e "---",
+        # st.markdown renderizará corretamente.
+        st.markdown(relatorio)
