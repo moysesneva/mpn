@@ -216,3 +216,4 @@ if st.button("Gerar Relatório de Leads Prioritários"):
         # Exibe o relatório completo. Como o agente já formata com Markdown e "---",
         # st.markdown renderizará corretamente.
         st.markdown(relatorio)
+    # 8. teste final
